@@ -698,13 +698,18 @@ def _skill_manage_from(payload: dict[str, Any], **extra) -> str:
         **{k: payload.get(k) for k in _FLAT_OP_KEYS}, **extra)
 
 
-def apply_skill_pending(payload: dict[str, Any]) -> str:
-    """Replay a staged skill write, bypassing the gate (the /skills approve handler)."""
+def apply_skill_pending(payload: dict[str, Any], provenance: Optional[dict[str, Any]] = None) -> str:
+    """Replay a staged skill write, bypassing the gate (the /skills approve handler). ``provenance``
+    (the pending record's source references) is re-bound so the ledger entry carries it."""
+    from tools.skill_provenance import reset_write_provenance, set_write_provenance
+    # Provenance first: if binding it raises, the gate bypass must never have been switched on.
+    prov_token = set_write_provenance(provenance if isinstance(provenance, dict) else None)
     token = _skill_gate_bypass.set(True)
     try:
         return _skill_manage_from(payload)
     finally:
         _skill_gate_bypass.reset(token)
+        reset_write_provenance(prov_token)
 
 
 def _act_patch(a):
@@ -739,6 +744,9 @@ def _record_success(action, name, result, *, file_path, absorbed_into, task_id,
         _evidence = ({"absorbed_into": absorbed_into, "archived": bool(result.get("_archived"))}
                      if action == "delete" else {})
         _evidence.update({k: v for k, v in (("session_id", session_id), ("file_path", file_path)) if v})
+        from tools.skill_provenance import get_write_provenance
+        if prov := get_write_provenance():
+            _evidence["provenance"] = prov
         _ledger.record_mutation(
             action, name, before=ledger_before if ledger_before is not None else [],
             after_root=_post["path"] if _post else None, evidence=_evidence)

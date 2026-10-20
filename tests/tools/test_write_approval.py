@@ -430,3 +430,41 @@ def test_staged_hint_keeps_command_for_chat_gateway_platform(hermes_home, monkey
     monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
     r = _stage_one_memory_write()
     assert "/memory pending" in r["message"], r["message"]
+
+
+# ---------------------------------------------------------------------------
+# Write provenance: staged record -> approval -> skill ledger evidence
+# ---------------------------------------------------------------------------
+
+def test_write_provenance_rides_from_staging_to_the_skill_ledger(hermes_home):
+    """Source references bound around a gated write are kept in the pending record and, on approval
+    (outside the original context), recorded as the ledger entry's evidence. A record whose provenance
+    is not a dict (hand-edited, corrupted) or not JSON-safe never leaves the approval bypass on."""
+    from hermes_cli.write_approval_commands import handle_pending_subcommand
+    from tools import skill_ledger
+    from tools import skill_manager_tool as smt
+    from tools import write_approval as wa
+    from tools.skill_provenance import reset_write_provenance, set_write_provenance
+    _set_approval("skills", True)
+    meta = {"source": "review-queue", "refs": ["ticket-17", "ticket-40"]}
+    content = "---\nname: {0}\ndescription: Use when probing. Probe.\n---\n# Probe\n"
+    token = set_write_provenance(meta)
+    try:
+        r = json.loads(smt.skill_manage(action="create", name="prov-probe", content=content.format("prov-probe")))
+    finally:
+        reset_write_provenance(token)
+    assert r.get("staged") and wa.get_pending(wa.SKILLS, r["pending_id"])["provenance"] == meta
+    handle_pending_subcommand(wa.SKILLS, ["approve", r["pending_id"]])
+    entries = skill_ledger.list_entries("prov-probe")
+    assert entries and entries[0]["evidence"].get("provenance") == meta
+
+    r = json.loads(smt.skill_manage(action="create", name="prov-a", content=content.format("prov-a")))
+    path = wa._pending_path(wa.SKILLS, r["pending_id"])
+    rec = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**rec, "provenance": "not-a-dict"}), encoding="utf-8")
+    handle_pending_subcommand(wa.SKILLS, ["approve", r["pending_id"]])
+    with pytest.raises(TypeError):
+        smt.apply_skill_pending({"action": "create", "name": "prov-x", "content": "x"}, provenance={"x": object()})
+    assert smt._skill_gate_bypass.get() is False
+    after = json.loads(smt.skill_manage(action="create", name="prov-b", content=content.format("prov-b")))
+    assert after.get("staged") is True and smt._find_skill("prov-b") is None
